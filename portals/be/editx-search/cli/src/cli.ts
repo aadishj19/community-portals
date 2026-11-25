@@ -31,7 +31,9 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
 }
 
 function parseArgv(argv: string[]): Parsed {
-  const parsed: Parsed = { positionals: [], flags: {} }
+  // A null prototype, so a flag named like an Object.prototype key
+  // (--__proto__, --constructor) is an ordinary unknown flag, not a no-op.
+  const parsed: Parsed = { positionals: [], flags: Object.create(null) as Record<string, FlagValue> }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (!arg.startsWith("-") || arg === "-") {
@@ -45,7 +47,8 @@ function parseArgv(argv: string[]): Parsed {
       inline = name.slice(eq + 1)
       name = name.slice(0, eq)
     }
-    const key = ALIAS[name] ?? name
+    // Own properties only: ALIAS["__proto__"] would otherwise return Object.prototype.
+    const key = Object.hasOwn(ALIAS, name) ? ALIAS[name] : name
     if (key in parsed.flags && parsed.repeated === undefined) parsed.repeated = key
     const next = argv[i + 1]
     if (inline !== undefined) {
@@ -135,8 +138,9 @@ async function main(): Promise<number> {
     return 1
   }
 
+  // Own properties only: "constructor" or "toString" is not a command.
+  if (!Object.hasOwn(KNOWN_FLAGS, cmd)) return fail(`Unknown command "${cmd}"; use search or detail`, "BAD_CMD")
   const known = KNOWN_FLAGS[cmd]
-  if (!known) return fail(`Unknown command "${cmd}"; use search or detail`, "BAD_CMD")
 
   if (dashValue && known.has(dashValue.flag)) {
     return fail(

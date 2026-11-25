@@ -53,6 +53,8 @@ and the test fixtures have it removed.
   `educations` (`[{id,label}]`), and `company` details.
 - Unknown id: **404** with the JSON body `"Not Found"`. The CLI exits 1 with
   `NOT_FOUND`.
+- A 200 whose body is not a job with a numeric `id` (an API change) exits 1
+  with `DETAIL_FAILED` instead of printing a bogus result.
 
 ## Public posting URL
 

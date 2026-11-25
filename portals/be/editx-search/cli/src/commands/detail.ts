@@ -1,6 +1,7 @@
 import {
   DETAIL_PATH,
   apiGet,
+  isJob,
   normalizeId,
   stripInvisible,
   toDetail,
@@ -25,6 +26,7 @@ function renderPlain(job: JobDetailResult): string {
   field("Open to apply", job.open_to_apply === null ? null : job.open_to_apply ? "yes" : "no")
   field("Remote", job.remote)
   field("Contract", job.contract)
+  field("Functions", list(job.functions))
   field("Experience", list(job.experience))
   field("Education", list(job.education))
   field("Languages", list(job.languages))
@@ -44,8 +46,14 @@ export async function runDetail(opts: DetailOpts): Promise<number> {
   }
   try {
     const body = await apiGet<EditxJobDetail>(`${DETAIL_PATH}${encodeURIComponent(id)}`)
-    if (!body || typeof body !== "object" || body.id === undefined) {
+    if (!body) {
       writeError(`Editx job ${id} not found`, "NOT_FOUND")
+      return 1
+    }
+    // The same check search applies per entry: a 200 without a numeric id is
+    // not a job, so it fails instead of printing a bogus id and URL.
+    if (!isJob(body)) {
+      writeError(`unexpected response shape from the editx API for job ${id} (no numeric id)`, "DETAIL_FAILED")
       return 1
     }
     const job = stripInvisible(toDetail(body))

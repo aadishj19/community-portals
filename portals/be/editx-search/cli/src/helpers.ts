@@ -334,7 +334,15 @@ const NAMED_ENTITIES: Record<string, string> = {
   euro: "€",
   bull: "•",
   middot: "·",
+  // Punctuation and whitespace references, mostly seen in attribute values.
+  colon: ":",
+  semi: ";",
+  sol: "/",
+  Tab: "\t",
+  NewLine: "\n",
 }
+
+const CASE_SENSITIVE_ENTITIES = new Set(["colon", "semi", "sol"])
 
 function numericEntity(cp: number): string {
   return cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : ""
@@ -348,8 +356,12 @@ export function decodeHtmlEntities(text: string): string {
   return text.replace(/&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z]+));/g, (whole, dec, hex, name) => {
     if (dec) return numericEntity(parseInt(dec, 10))
     if (hex) return numericEntity(parseInt(hex, 16))
-    const named = NAMED_ENTITIES[name] ?? NAMED_ENTITIES[String(name).toLowerCase()]
-    return named ?? whole
+    // Own properties only, so names like "constructor" are left as written.
+    if (Object.hasOwn(NAMED_ENTITIES, name)) return NAMED_ENTITIES[name]
+    // The lowercase fallback covers the legacy Latin-1 names ("&AMP;").
+    // Punctuation names are case-sensitive in HTML: "&Colon;" is U+2237, not ":".
+    const lower = String(name).toLowerCase()
+    return Object.hasOwn(NAMED_ENTITIES, lower) && !CASE_SENSITIVE_ENTITIES.has(lower) ? NAMED_ENTITIES[lower] : whole
   })
 }
 
@@ -375,15 +387,82 @@ export function stripInvisible<T>(value: T): T {
 
 const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"])
 
+// One attribute as the HTML tokenizer reads it: a name (which may start with
+// `=` and contain quotes), then optionally `=` and a value that is
+// double-quoted, single-quoted, or unquoted. Quotes only open a value right
+// after `=`; inside an unquoted value (data-x=o'brien) they are ordinary
+// characters.
+//
+// The attribute is matched atomically: the lookahead captures the longest
+// attribute at this position and the backreference consumes exactly that, so
+// the engine can never re-split `x= y=` into different attributes. Without it
+// the number of ways to parse a run of `x= ` grows exponentially (a 120-char
+// string took seconds). The capture is named so adding a group to TAG cannot
+// silently retarget the backreference.
+const ATTR = String.raw`(?=(?<attr>[^\s/>][^\s/>=]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*))?))\k<attr>`
+// An opening or closing tag: a name, then attributes separated by whitespace
+// or `/` (as in `<div/hidden>`), then `>`.
+const TAG = new RegExp(String.raw`<(\/?)([a-zA-Z][^\s/>]*)((?:[\s/]*${ATTR})*)[\s/]*>`, "g")
+// An opening <li> tag, attribute-aware in the same way, for the bullet rewrite.
+const LI_TAG = new RegExp(String.raw`<li(?=[\s/>])(?:[\s/]*${ATTR})*[\s/]*>|<li\b[^>]*>`, "gi")
+
+const HIDING_STYLE = /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|content-visibility\s*:\s*hidden|mso-hide\s*:\s*all)\b/i
+
+/**
+ * An attribute value as a browser sees it: entities decoded, including numeric
+ * references without their trailing semicolon (`&#58none`, `&#x3anone`), which
+ * browsers also accept in attribute values.
+ */
+function decodeAttributeValue(value: string): string {
+  return decodeHtmlEntities(
+    value.replace(/&#(\d+)(?![\d;])/g, "&#$1;").replace(/&#([xX][0-9a-fA-F]+)(?![0-9a-fA-F;])/g, "&#$1;"),
+  )
+}
+
+// A CSS string ("..." or '...', with backslash escapes) or an unquoted url(...)
+// is kept as-is; a comment outside them becomes a space, since CSS reads a
+// comment as a token separator. A `/*` inside a string or url() is text.
+// Each string branch ends with `\\?` so a lone backslash before the end of the
+// value is absorbed: without it the branch could fail and backtrack through
+// the whole run from every later quote, which is quadratic.
+const CSS_COMMENT_OR_STRING = /("(?:[^"\\]|\\[\s\S])*\\?(?:"|$)|'(?:[^'\\]|\\[\s\S])*\\?(?:'|$)|\burl\(\s*[^"'()\s]*\s*(?:\)|$))|\/\*[\s\S]*?(?:\*\/|$)/gi
+
+function stripCssComments(css: string): string {
+  return css.replace(CSS_COMMENT_OR_STRING, (_whole, keep: string | undefined) => keep ?? " ")
+}
+
+/**
+ * CSS escapes resolved in one pass, so an escape's output is never unescaped
+ * again: `\6e ` (hex, with one optional trailing whitespace, CRLF counting as
+ * one) and `\o` (any other character).
+ */
+function cssUnescape(css: string): string {
+  return css.replace(/\\(?:([0-9a-fA-F]{1,6})(?:\r\n|[ \t\n\r\f])?|([^\n0-9a-fA-F]))/g, (_w, hex: string | undefined, ch: string | undefined) => {
+    if (hex === undefined) return ch ?? ""
+    const cp = parseInt(hex, 16)
+    return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : "�"
+  })
+}
+
+/**
+ * Whether an inline style hides its element. The value is entity-decoded,
+ * then checked twice - with comments removed CSS-aware (strings and url()
+ * kept) and with every `/*...*\/` removed naively - and CSS escapes resolved
+ * in both. Either reading that hides the element wins: failing closed costs a
+ * visible element, failing open would leak hidden text.
+ */
+function isHidingStyle(value: string): boolean {
+  const raw = decodeAttributeValue(value)
+  const readings = [stripCssComments(raw), raw.replace(/\/\*[\s\S]*?(?:\*\/|$)/g, " ")]
+  return readings.some((css) => HIDING_STYLE.test(cssUnescape(css)))
+}
+
 /** Whether an opening tag's attributes keep it from rendering: `hidden`, or an inline style that hides it. */
 function isHiddenTag(attrs: string): boolean {
-  for (const m of attrs.matchAll(/([^\s"'=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) {
+  for (const m of attrs.matchAll(/([^\s"'=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
     const name = m[1].toLowerCase()
-    const value = m[2] ?? m[3] ?? m[4] ?? ""
     if (name === "hidden") return true
-    if (name === "style" && /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all)\b/i.test(value)) {
-      return true
-    }
+    if (name === "style" && isHidingStyle(m[2] ?? m[3] ?? m[4] ?? "")) return true
   }
   return false
 }
@@ -395,14 +474,21 @@ function isHiddenTag(attrs: string): boolean {
  * caught here.
  */
 export function visibleHtml(html: string): string {
+  // Comments end at `-->` or `--!>` (both close one in a browser), and `<!-->`
+  // is an empty comment. An opener with no `>` at all runs to the end in one
+  // match, so a long run of unclosed `<script x` cannot make this quadratic.
   const src = html
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, "")
-    .replace(/<(script|style|template|noscript)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-  const tags = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:[\s/](?:[^>"']|"[^"]*"|'[^']*')*)?)>/g
+    .replace(/<!--(?:-?>|[\s\S]*?(?:--!?>|$))/g, "")
+    .replace(/<(script|style|template|noscript)\b[^>]*(?:>[\s\S]*?(?:<\/\1\s*>|$)|$)/gi, "")
+  const tags = new RegExp(TAG.source, "g")
+  // No tag can end past the last `>`, so scanning stops there. Without this,
+  // every `<` in a long unclosed tail is tried against the rest of the input,
+  // which is quadratic.
+  const scan = src.slice(0, src.lastIndexOf(">") + 1)
   const kept: string[] = []
   let from = 0
   let m: RegExpExecArray | null
-  while ((m = tags.exec(src)) !== null) {
+  while ((m = tags.exec(scan)) !== null) {
     if (m[1] || !m[3] || !isHiddenTag(m[3])) continue
     const tag = m[2].toLowerCase()
     let end = tags.lastIndex
@@ -413,7 +499,7 @@ export function visibleHtml(html: string): string {
       end = src.length
       let depth = 1
       let s: RegExpExecArray | null
-      while ((s = tags.exec(src)) !== null) {
+      while ((s = tags.exec(scan)) !== null) {
         if (s[2].toLowerCase() !== tag) continue
         depth += s[1] ? -1 : 1
         if (depth === 0) {
@@ -437,14 +523,34 @@ export function visibleHtml(html: string): string {
  */
 export function cleanHtml(html: string | null | undefined): string | null {
   if (!html) return null
-  const withBreaks = visibleHtml(html)
-    .replace(/<\s*br\s*\/?>/gi, "\n")
-    .replace(/<li\b[^>]*>/gi, "\n- ")
-    .replace(/<\/(p|ul|ol|div|h\d)>/gi, "\n")
-  // Quote-aware, like visibleHtml: a `>` inside a quoted attribute is not the
-  // end of the tag. Only `<` that starts a tag is stripped, so prose such as
-  // "salary < 5000" survives.
-  const text = decodeHtmlEntities(withBreaks.replace(/<[a-zA-Z/!?](?:[^>"']|"[^"]*"|'[^']*')*>/g, " "))
+  const visible = visibleHtml(html)
+  // Only the part up to the last `>` can hold a complete tag; the cut is taken
+  // before any rewriting, because rewriting `</p>`/`<br>` removes `>`s and
+  // would move it. In the tail after it, a `<` followed by a letter, `/`, `!`
+  // or `?` opens a tag that never closes, which renders nothing in a browser,
+  // so it is dropped with everything after it. Any other `<` is prose
+  // ("salary < 5000", "<3") and stays.
+  const cut = visible.lastIndexOf(">") + 1
+  let tail = visible.slice(cut)
+  const unclosed = tail.search(/<[a-zA-Z/!?]/)
+  if (unclosed >= 0) tail = tail.slice(0, unclosed)
+  // Block and line-break tags become newlines, list items a bullet. Then tags
+  // are stripped with the same attribute-aware pattern visibleHtml uses (a `>`
+  // inside a quoted value is not the end of the tag), and anything left that
+  // still opens like a tag - declarations, malformed tags - is dropped up to
+  // its `>`.
+  const stripped =
+    visible
+      .slice(0, cut)
+      .replace(/<\s*br\s*\/?>/gi, "\n")
+      // Attributes are matched with TAG's atomic ATTR, so quotes pair the way
+      // the HTML tokenizer pairs them and the match cannot backtrack across
+      // later tags; the plain form is a fallback that still gives a bullet.
+      .replace(LI_TAG, "\n- ")
+      .replace(/<\/(p|ul|ol|div|h\d)>/gi, "\n")
+      .replace(new RegExp(TAG.source, "g"), " ")
+      .replace(/<[a-zA-Z/!?][^>]*>/g, " ") + tail
+  const text = decodeHtmlEntities(stripped)
     .replace(/[ \t]+/g, " ")
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")

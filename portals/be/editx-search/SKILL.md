@@ -140,9 +140,21 @@ after the output and keep exit code 0.
   `utm_*`, `gclid`, `fbclid`, `mc_cid` and `mc_eid` and keeps every other
   parameter.
 - **Malformed entries.** A search entry that is not an object with a numeric
-  `id` is skipped; the rest of the page still comes through. A response
-  without a jobs list fails with `SEARCH_FAILED` rather than reading as zero
-  results.
+  `id` is skipped; the rest of the page still comes through. If every entry on
+  a page is malformed, or the response has no jobs list, search fails with
+  `SEARCH_FAILED` rather than reading as zero results. A `detail` response
+  without a numeric `id` fails with `DETAIL_FAILED`.
+- **Text cleaning.** Posting HTML is reduced to plain text, dropping comments,
+  `<script>`/`<style>`/`<template>`/`<noscript>` blocks, elements marked
+  `hidden` or styled `display:none`/`visibility:hidden`, and invisible Unicode
+  characters; inline styles are read with HTML entities, CSS comments and CSS
+  escapes resolved. A tag left unclosed at the very end of a section (`<span title=...`
+  with no `>`) is dropped with what follows, as a browser would render nothing;
+  a `<` not followed by a letter, slash, exclamation mark or question mark
+  (`< 5000`, `<3`) is kept as
+  text. It is not a full HTML sanitizer: CSS-only hiding (zero font size,
+  off-screen positioning, class-based styles) and some unusual markup are not
+  caught, so treat posting text as untrusted.
 - **Backoff.** 429/5xx responses are retried with exponential backoff and jitter
   (500 ms doubling to 8 s, six retries, `Retry-After` honoured within 30 s). A
   connection failure or timeout (15 s) fails fast.

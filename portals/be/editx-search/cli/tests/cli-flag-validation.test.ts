@@ -34,6 +34,20 @@ describe("command and flag validation", () => {
   })
 
   test("unknown command", () => expectError(["find", "-q", "x"], "BAD_CMD"))
+  for (const inherited of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    test(`inherited name ${inherited} is not a command`, () => expectError([inherited, "20750"], "BAD_CMD"))
+  }
+  for (const inherited of ["__proto__", "constructor", "toString"]) {
+    for (const form of [[`--${inherited}`, "x"], [`--${inherited}`], [`--${inherited}=x`]]) {
+      test(`${form.join(" ")} is rejected as an unknown flag by its own name`, async () => {
+        const result = await runCLI(["search", "-q", "python", ...form])
+        expect(result.exitCode).toBe(1)
+        const [err] = stderrJSON(result)
+        expect(err.code).toBe("UNKNOWN_FLAG")
+        expect(err.error).toContain(`unknown flag --${inherited} `)
+      })
+    }
+  }
   test("unknown flag is rejected, not ignored", () => expectError(["search", "-q", "python", "--country", "BE"], "UNKNOWN_FLAG"))
   test("flag from the other command is rejected", () => expectError(["detail", "20750", "--page", "2"], "UNKNOWN_FLAG"))
   test("stray positional argument", () => expectError(["search", "-q", "python", "leuven"], "BAD_ARG"))

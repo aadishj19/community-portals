@@ -85,6 +85,11 @@ describe("small helpers", () => {
       "d\u00E9veloppeur \u00E0 Li\u00E8ge \u2013 5\u20AC \u00C9t\u00E9 \u2019",
     )
     expect(decodeHtmlEntities("&unknownthing;")).toBe("&unknownthing;")
+    // Punctuation names are case-sensitive: &Colon; is U+2237, so it must not become ":".
+    expect(decodeHtmlEntities("a&colon;b &Colon; &COLON; &AMP;")).toBe("a:b &Colon; &COLON; &")
+    for (const inherited of ["constructor", "toString", "hasOwnProperty", "valueOf"]) {
+      expect(decodeHtmlEntities(`&${inherited};`)).toBe(`&${inherited};`)
+    }
   })
 
   test("normalizeId accepts ids and editx.eu posting URLs only", () => {

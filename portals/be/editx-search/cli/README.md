@@ -23,10 +23,15 @@ bun run src/cli.ts detail 20750 --format plain
 bun run src/cli.ts --help
 ```
 
-| Command | Flags |
-|---|---|
-| `search` | `--query/-q` (required), `--location/-l`, `--jobage`, `--page`, `--limit/-n`, `--format json\|table\|plain` |
-| `detail <id\|url>` | `--format json\|plain` |
+| Command | Flag | Default |
+|---|---|---|
+| `search` | `--query/-q <text>` | required |
+| | `--location/-l <place>` | none (whole board) |
+| | `--jobage <days>` | none (no date filter) |
+| | `--page <n>` | `1` |
+| | `--limit/-n <n>` | `25` (max 50) |
+| | `--format json\|table\|plain` | `json` |
+| `detail <id\|url>` | `--format json\|plain` | `json` |
 
 Unknown or repeated flags, missing values, numbers that are not plain digits
 and stray arguments exit 1 with a JSON error on stderr instead of being

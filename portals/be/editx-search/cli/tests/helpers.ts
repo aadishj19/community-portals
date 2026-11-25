@@ -38,20 +38,24 @@ export interface FixtureReply {
  */
 export async function runWithFixture(args: string[], reply: FixtureReply): Promise<{ result: CLIResult; requests: URL[] }> {
   const requests: URL[] = []
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      requests.push(new URL(request.url))
-      const body = reply.file ? await Bun.file(join(import.meta.dir, "fixtures", reply.file)).json() : reply.body
-      return Response.json(body, { status: reply.status ?? 200 })
-    },
-  })
   const dir = mkdtempSync(join(tmpdir(), "editx-fixture-"))
-  const preload = join(dir, "fetch.ts")
-  writeFileSync(
-    preload,
-    `
+  let server: ReturnType<typeof Bun.serve> | undefined
+  // Everything after the temp dir exists runs inside try, so a failure while
+  // starting the server or writing the preload still cleans both up.
+  try {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests.push(new URL(request.url))
+        const body = reply.file ? await Bun.file(join(import.meta.dir, "fixtures", reply.file)).json() : reply.body
+        return Response.json(body, { status: reply.status ?? 200 })
+      },
+    })
+    const preload = join(dir, "fetch.ts")
+    writeFileSync(
+      preload,
+      `
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (input, init) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
@@ -61,11 +65,10 @@ export async function runWithFixture(args: string[], reply: FixtureReply): Promi
       return originalFetch(${JSON.stringify(server.url.origin)} + url.pathname + url.search, init);
     };
   `,
-  )
-  try {
+    )
     return { result: await runCLI(args, preload), requests }
   } finally {
-    server.stop(true)
+    server?.stop(true)
     rmSync(dir, { recursive: true, force: true })
   }
 }

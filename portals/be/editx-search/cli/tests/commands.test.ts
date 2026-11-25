@@ -89,6 +89,14 @@ describe("search through the real CLI (offline fixture)", () => {
     expect(out.results.map((r) => r.id)).toEqual(["42"])
   })
 
+  test("a page where every entry is malformed fails instead of reading as zero results", async () => {
+    const body = { total: 12, page: 0, count: 50, jobs: [{ id: "abc", title: "x" }, { id: null }, null] }
+    const { result } = await runWithFixture(["search", "-q", "python"], { body })
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe("")
+    expect(stderrJSON(result)[0].code).toBe("SEARCH_FAILED")
+  })
+
   test("an unexpected response shape fails loudly instead of reading as zero results", async () => {
     const { result } = await runWithFixture(["search", "-q", "python"], { body: { total: 5, jobs: { items: [] } } })
     expect(result.exitCode).toBe(1)
@@ -168,9 +176,19 @@ describe("detail through the real CLI (offline fixture)", () => {
     }
   })
 
+  for (const bad of [{ id: null, title: "x" }, { id: "abc", title: "x" }, { title: "no id" }, ["not", "a", "job"], "a string"]) {
+    test(`a 200 detail body without a numeric id (${JSON.stringify(bad)}) fails as DETAIL_FAILED`, async () => {
+      const { result } = await runWithFixture(["detail", "20750"], { body: bad })
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(stderrJSON(result)[0].code).toBe("DETAIL_FAILED")
+    })
+  }
+
   test("plain format", async () => {
     const { result } = await runWithFixture(["detail", "20750", "--format", "plain"], { file: "detail-20750.json" })
     expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("Functions: Developer / Programmer")
     expect(result.stdout.split("\n")[0]).toBe("Python Developer | Financial Sector")
     expect(result.stdout).toContain("URL: https://editx.eu/en/it-jobs/20750/")
     expect(result.stdout).toContain("id: 20750")

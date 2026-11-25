@@ -102,8 +102,15 @@ export async function runSearch(opts: SearchOpts): Promise<number> {
     const jobs = Array.isArray(body.jobs) ? body.jobs : []
     const total = body.jobs === null && opts.page > 1 ? null : (typeof body.total === "number" ? body.total : null)
 
-    // One malformed entry (null, or no numeric id) is skipped, not fatal.
-    let rows = stripInvisible(jobs.filter(isJob).map(toResult))
+    // One malformed entry (null, or no numeric id) is skipped, not fatal. If
+    // every entry is malformed, the shape changed: fail rather than report
+    // zero results next to the API's non-zero total.
+    const valid = jobs.filter(isJob)
+    if (jobs.length > 0 && valid.length === 0) {
+      writeError("no usable jobs in the editx API response (entries lack a numeric id); the response shape may have changed", "SEARCH_FAILED")
+      return 1
+    }
+    let rows = stripInvisible(valid.map(toResult))
     if (opts.jobage !== undefined) rows = rows.filter((r) => withinDays(r.date, opts.jobage as number))
     rows = rows.slice(0, opts.limit)
 
