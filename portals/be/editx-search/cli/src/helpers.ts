@@ -290,8 +290,8 @@ export function toDetail(job: EditxJobDetail): JobDetailResult {
 }
 
 // ---------------------------------------------------------------------------
-// Output hygiene (copied from linkedin-search/freehire-search helpers, with
-// <noscript> added to the never-rendered blocks).
+// Output hygiene (started from the linkedin-search/freehire-search helpers;
+// the HTML cleaning here reads tags with one tokenizer).
 
 // The markup entities plus the Latin-1 letters and typographic marks that turn
 // up in Dutch and French postings. Unknown names are left as written.
@@ -391,20 +391,75 @@ const VOID_TAGS = new Set(["area", "base", "br", "col", "embed", "hr", "img", "i
 // `=` and contain quotes), then optionally `=` and a value that is
 // double-quoted, single-quoted, or unquoted. Quotes only open a value right
 // after `=`; inside an unquoted value (data-x=o'brien) they are ordinary
-// characters.
+// characters. A name followed by `=` always takes a value, and a value that
+// opens with a quote must close with it: `alt="x>` with no closing quote is
+// not an attribute, so the tag around it never closes, as in a browser.
 //
 // The attribute is matched atomically: the lookahead captures the longest
 // attribute at this position and the backreference consumes exactly that, so
 // the engine can never re-split `x= y=` into different attributes. Without it
 // the number of ways to parse a run of `x= ` grows exponentially (a 120-char
 // string took seconds). The capture is named so adding a group to TAG cannot
-// silently retarget the backreference.
-const ATTR = String.raw`(?=(?<attr>[^\s/>][^\s/>=]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*))?))\k<attr>`
+// silently retarget the backreference. Inside the lookahead the name cannot
+// shorten (`(?![^...=])`) and the unquoted value cannot start at a quote or
+// whitespace, so a failed value cannot be re-read as a shorter attribute.
+//
+// Whitespace is HTML's (tab, LF, FF, CR, space), not JavaScript's `\s`, which
+// also matches U+00A0 and other Unicode spaces that HTML reads as ordinary
+// characters (`title= "x>` is an unquoted value and the tag closes).
+const WS = String.raw`\t\n\f\r `
+const ATTR = String.raw`(?=(?<attr>[^${WS}/>][^${WS}/>=]*(?![^${WS}/>=])(?:[${WS}]*=[${WS}]*(?:"[^"]*"|'[^']*'|(?!["'${WS}])[^${WS}>]*)|(?![${WS}]*=))))\k<attr>`
 // An opening or closing tag: a name, then attributes separated by whitespace
-// or `/` (as in `<div/hidden>`), then `>`.
-const TAG = new RegExp(String.raw`<(\/?)([a-zA-Z][^\s/>]*)((?:[\s/]*${ATTR})*)[\s/]*>`, "g")
-// An opening <li> tag, attribute-aware in the same way, for the bullet rewrite.
-const LI_TAG = new RegExp(String.raw`<li(?=[\s/>])(?:[\s/]*${ATTR})*[\s/]*>|<li\b[^>]*>`, "gi")
+// or `/` (as in `<div/hidden>`), then `>`. The name cannot shorten either:
+// otherwise a tag that does not close is retried at every shorter name, each
+// retry re-reading every attribute, which is quadratic. Sticky: tokenize()
+// matches it at one position at a time.
+const TAG = new RegExp(String.raw`<(\/?)([a-zA-Z][^${WS}/>]*)(?![^${WS}/>])((?:[${WS}/]*${ATTR})*)[${WS}/]*>`, "y")
+// One attribute of a tag TAG already matched, read with the same name and
+// value rules, so `hidden` and `style` are found where the browser finds them.
+const ATTR_PARTS = new RegExp(String.raw`([^${WS}/>][^${WS}/>=]*)(?:[${WS}]*=[${WS}]*(?:"([^"]*)"|'([^']*)'|([^${WS}>]*)))?`, "g")
+// `<!...>`, `<?...>` and `</` without a tag name: a bogus comment in the HTML
+// tokenizer, which ends at the first `>` whatever the quotes.
+const BOGUS_COMMENT = /<(?:[!?]|\/(?![a-zA-Z]))[^>]*>/y
+
+interface HtmlTag {
+  start: number
+  end: number
+  close: boolean
+  name: string // lowercase; "" for a bogus comment
+  attrs: string
+}
+
+/**
+ * The tags of an HTML fragment in order, read the way the HTML tokenizer reads
+ * them, and `cut`: where the fragment stops rendering. A tag closes only at a
+ * `>` outside a quoted attribute value, so a tag that never closes (`<span
+ * title=...` with no `>`, or `<img alt="x>...` whose quote never ends)
+ * renders nothing from there on, and `cut` is its start. A `<` followed by
+ * anything but a letter, `/`, `!` or `?` is prose ("salary < 5000", "<3") and
+ * not a tag. Each tag is matched in place and the scan resumes after its `>`,
+ * so the input is read once. (One alternation of TAG and BOGUS_COMMENT, run
+ * with exec, took over a minute in Bun on 640 KB of `<li `.)
+ */
+function tokenize(html: string): { tags: HtmlTag[]; cut: number } {
+  const tags: HtmlTag[] = []
+  const opener = /<[a-zA-Z/!?]/g
+  let o: RegExpExecArray | null
+  while ((o = opener.exec(html)) !== null) {
+    TAG.lastIndex = BOGUS_COMMENT.lastIndex = o.index
+    const t = TAG.exec(html)
+    if (t) {
+      tags.push({ start: o.index, end: TAG.lastIndex, close: t[1] === "/", name: t[2].toLowerCase(), attrs: t[3] })
+      opener.lastIndex = TAG.lastIndex
+    } else if (BOGUS_COMMENT.test(html)) {
+      tags.push({ start: o.index, end: BOGUS_COMMENT.lastIndex, close: false, name: "", attrs: "" })
+      opener.lastIndex = BOGUS_COMMENT.lastIndex
+    } else {
+      return { tags, cut: o.index }
+    }
+  }
+  return { tags, cut: html.length }
+}
 
 const HIDING_STYLE = /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|content-visibility\s*:\s*hidden|mso-hide\s*:\s*all)\b/i
 
@@ -459,7 +514,7 @@ function isHidingStyle(value: string): boolean {
 
 /** Whether an opening tag's attributes keep it from rendering: `hidden`, or an inline style that hides it. */
 function isHiddenTag(attrs: string): boolean {
-  for (const m of attrs.matchAll(/([^\s"'=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+  for (const m of attrs.matchAll(ATTR_PARTS)) {
     const name = m[1].toLowerCase()
     if (name === "hidden") return true
     if (name === "style" && isHidingStyle(m[2] ?? m[3] ?? m[4] ?? "")) return true
@@ -475,82 +530,71 @@ function isHiddenTag(attrs: string): boolean {
  */
 export function visibleHtml(html: string): string {
   // Comments end at `-->` or `--!>` (both close one in a browser), and `<!-->`
-  // is an empty comment. An opener with no `>` at all runs to the end in one
-  // match, so a long run of unclosed `<script x` cannot make this quadratic.
+  // is an empty comment. The blocks removed next go before tokenizing, each
+  // through its first close tag. An opener with no `>` at all runs to the end
+  // in one match, so a long run of unclosed `<script x` cannot make this
+  // quadratic.
   const src = html
     .replace(/<!--(?:-?>|[\s\S]*?(?:--!?>|$))/g, "")
     .replace(/<(script|style|template|noscript)\b[^>]*(?:>[\s\S]*?(?:<\/\1\s*>|$)|$)/gi, "")
-  const tags = new RegExp(TAG.source, "g")
-  // No tag can end past the last `>`, so scanning stops there. Without this,
-  // every `<` in a long unclosed tail is tried against the rest of the input,
-  // which is quadratic.
-  const scan = src.slice(0, src.lastIndexOf(">") + 1)
+  const { tags } = tokenize(src)
   const kept: string[] = []
   let from = 0
-  let m: RegExpExecArray | null
-  while ((m = tags.exec(scan)) !== null) {
-    if (m[1] || !m[3] || !isHiddenTag(m[3])) continue
-    const tag = m[2].toLowerCase()
-    let end = tags.lastIndex
-    if (!VOID_TAGS.has(tag)) {
+  for (let i = 0; i < tags.length; i++) {
+    const t = tags[i]
+    if (t.close || !t.name || !isHiddenTag(t.attrs)) continue
+    let end = t.end
+    if (!VOID_TAGS.has(t.name)) {
       // Skip to the matching close tag, counting nested same-name elements. An
       // unclosed hidden element runs to the end: failing closed drops visible
       // text, failing open would leak the hidden text.
       end = src.length
       let depth = 1
-      let s: RegExpExecArray | null
-      while ((s = tags.exec(scan)) !== null) {
-        if (s[2].toLowerCase() !== tag) continue
-        depth += s[1] ? -1 : 1
+      for (i++; i < tags.length; i++) {
+        if (tags[i].name !== t.name) continue
+        depth += tags[i].close ? -1 : 1
         if (depth === 0) {
-          end = tags.lastIndex
+          end = tags[i].end
           break
         }
       }
     }
-    kept.push(src.slice(from, m.index))
+    kept.push(src.slice(from, t.start))
     from = end
-    tags.lastIndex = end
   }
   kept.push(src.slice(from))
   return kept.join("")
 }
 
+/** What a tag becomes in plain text: a newline for line breaks and closed blocks, a bullet for a list item, else a space. */
+function tagText(tag: HtmlTag): string {
+  if (tag.name === "br") return "\n"
+  if (tag.name === "li" && !tag.close) return "\n- "
+  if (tag.close && /^(?:p|ul|ol|div|h\d)$/.test(tag.name)) return "\n"
+  return " "
+}
+
 /**
- * A posting's HTML section as readable text: hidden markup dropped, block and
- * line-break tags become newlines, list items get a bullet, tags are stripped
- * first and entities decoded once afterwards. Null for empty input.
+ * A posting's HTML section as readable text: hidden markup dropped, each tag
+ * replaced by a newline, a bullet or a space, everything after a tag that
+ * never closes dropped, and entities decoded once afterwards. Null for empty
+ * input.
  */
 export function cleanHtml(html: string | null | undefined): string | null {
   if (!html) return null
   const visible = visibleHtml(html)
-  // Only the part up to the last `>` can hold a complete tag; the cut is taken
-  // before any rewriting, because rewriting `</p>`/`<br>` removes `>`s and
-  // would move it. In the tail after it, a `<` followed by a letter, `/`, `!`
-  // or `?` opens a tag that never closes, which renders nothing in a browser,
-  // so it is dropped with everything after it. Any other `<` is prose
-  // ("salary < 5000", "<3") and stays.
-  const cut = visible.lastIndexOf(">") + 1
-  let tail = visible.slice(cut)
-  const unclosed = tail.search(/<[a-zA-Z/!?]/)
-  if (unclosed >= 0) tail = tail.slice(0, unclosed)
-  // Block and line-break tags become newlines, list items a bullet. Then tags
-  // are stripped with the same attribute-aware pattern visibleHtml uses (a `>`
-  // inside a quoted value is not the end of the tag), and anything left that
-  // still opens like a tag - declarations, malformed tags - is dropped up to
-  // its `>`.
-  const stripped =
-    visible
-      .slice(0, cut)
-      .replace(/<\s*br\s*\/?>/gi, "\n")
-      // Attributes are matched with TAG's atomic ATTR, so quotes pair the way
-      // the HTML tokenizer pairs them and the match cannot backtrack across
-      // later tags; the plain form is a fallback that still gives a bullet.
-      .replace(LI_TAG, "\n- ")
-      .replace(/<\/(p|ul|ol|div|h\d)>/gi, "\n")
-      .replace(new RegExp(TAG.source, "g"), " ")
-      .replace(/<[a-zA-Z/!?][^>]*>/g, " ") + tail
-  const text = decodeHtmlEntities(stripped)
+  // Tags are replaced from the tokenizer's spans, never by separate regex
+  // passes: a pass for one kind of tag would also match inside another tag's
+  // attributes (`<x title="<br>">`) and leave the rest of that tag as text.
+  const { tags, cut } = tokenize(visible)
+  const parts: string[] = []
+  let from = 0
+  for (const t of tags) {
+    parts.push(visible.slice(from, t.start), tagText(t))
+    from = t.end
+  }
+  parts.push(visible.slice(from, cut))
+  const text = decodeHtmlEntities(parts.join(""))
     .replace(/[ \t]+/g, " ")
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")
